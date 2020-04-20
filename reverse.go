@@ -1,7 +1,6 @@
 package reverseproxy
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -52,6 +51,8 @@ type ReverseProxy struct {
 	// modifies the Response from the backend.
 	// If it returns an error, the proxy returns a StatusBadGateway error.
 	ModifyResponse func(*http.Response) error
+
+	Upsteam string
 }
 
 type requestCanceler interface {
@@ -378,48 +379,90 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
 
-	hij, ok := rw.(http.Hijacker)
-	if !ok {
-		p.logf("http server does not support hijacker")
-		return
+	transport := p.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
 	}
 
-	clientConn, _, err := hij.Hijack()
-	if err != nil {
-		p.logf("http: proxy error: %v", err)
-		return
-	}
+	p.logf("ServeHTTPS: %s", req.URL.Host)
+	outreq := new(http.Request)
+	// Shallow copies of maps, like header
+	*outreq = *req
 
-	proxyClient := http.Client{Timeout: 10 * time.Second}
+	if cn, ok := rw.(http.CloseNotifier); ok {
+		if requestCanceler, ok := transport.(requestCanceler); ok {
+			// After the Handler has returned, there is no guarantee
+			// that the channel receives a value, so to make sure
+			reqDone := make(chan struct{})
+			defer close(reqDone)
+			clientGone := cn.CloseNotify()
 
-	// The returned net.Conn may have read or write deadlines
-	// already set, depending on the configuration of the
-	// Server, to set or clear those deadlines as needed
-	// we set timeout to 5 minutes
-	deadline := time.Now()
-	if p.Timeout == 0 {
-		deadline = deadline.Add(time.Minute * 5)
-	} else {
-		deadline = deadline.Add(p.Timeout)
-	}
-
-	err = clientConn.SetDeadline(deadline)
-	if err != nil {
-		p.logf("http: proxy error: %v", err)
-		return
-	}
-
-	resp, err1 := proxyClient.Do(req)
-	if err1 != nil {
-		p.logf("filed to send request: %v", err1)
-	}
-	defer func() {
-		if nil != resp.Body {
-			resp.Body.Close()
+			go func() {
+				select {
+				case <-clientGone:
+					requestCanceler.CancelRequest(outreq)
+				case <-reqDone:
+				}
+			}()
 		}
-	}()
+	}
 
-	resp.Write(rw)
-	p.logf(fmt.Sprintf("response copyed from %s", req.URL.Host))
+	p.Director(outreq)
+	outreq.Close = false
+
+	// We may modify the header (shallow copied above), so we only copy it.
+	outreq.Header = make(http.Header)
+	copyHeader(outreq.Header, req.Header)
+
+	// Remove hop-by-hop headers listed in the "Connection" header, Remove hop-by-hop headers.
+	removeHeaders(outreq.Header)
+
+	// Add X-Forwarded-For Header.
+	addXForwardedForHeader(outreq)
+
+	res, err := transport.RoundTrip(outreq)
+	if err != nil {
+		p.logf("http: proxy error: %v", err)
+		rw.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	// Remove hop-by-hop headers listed in the "Connection" header of the response, Remove hop-by-hop headers.
+	removeHeaders(res.Header)
+
+	if p.ModifyResponse != nil {
+		if err := p.ModifyResponse(res); err != nil {
+			p.logf("http: proxy error: %v", err)
+			rw.WriteHeader(http.StatusBadGateway)
+			return
+		}
+	}
+
+	// Copy header from response to client.
+	copyHeader(rw.Header(), res.Header)
+
+	// The "Trailer" header isn't included in the Transport's response, Build it up from Trailer.
+	if len(res.Trailer) > 0 {
+		trailerKeys := make([]string, 0, len(res.Trailer))
+		for k := range res.Trailer {
+			trailerKeys = append(trailerKeys, k)
+		}
+		rw.Header().Add("Trailer", strings.Join(trailerKeys, ", "))
+	}
+
+	rw.WriteHeader(res.StatusCode)
+	if len(res.Trailer) > 0 {
+		// Force chunking if we saw a response trailer.
+		// This prevents net/http from calculating the length for short
+		// bodies and adding a Content-Length.
+		if fl, ok := rw.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}
+
+	p.copyResponse(rw, res.Body)
+	// close now, instead of defer, to populate res.Trailer
+	res.Body.Close()
+	copyHeader(rw.Header(), res.Trailer)
 
 }
