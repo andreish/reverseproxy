@@ -377,6 +377,55 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
 
-	p.ProxyHTTPS(rw, req)
+	hij, ok := rw.(http.Hijacker)
+	if !ok {
+		p.logf("http server does not support hijacker")
+		return
+	}
+
+	clientConn, _, err := hij.Hijack()
+	if err != nil {
+		p.logf("http: proxy error: %v", err)
+		return
+	}
+
+	proxyConn, err := net.Dial("tcp", req.URL.Host)
+	if err != nil {
+		p.logf("http: proxy error: %v", err)
+		return
+	}
+
+	// The returned net.Conn may have read or write deadlines
+	// already set, depending on the configuration of the
+	// Server, to set or clear those deadlines as needed
+	// we set timeout to 5 minutes
+	deadline := time.Now()
+	if p.Timeout == 0 {
+		deadline = deadline.Add(time.Minute * 5)
+	} else {
+		deadline = deadline.Add(p.Timeout)
+	}
+
+	err = clientConn.SetDeadline(deadline)
+	if err != nil {
+		p.logf("http: proxy error: %v", err)
+		return
+	}
+
+	err = proxyConn.SetDeadline(deadline)
+	if err != nil {
+		p.logf("http: proxy error: %v", err)
+		return
+	}
+
+	go func() {
+		io.Copy(clientConn, proxyConn)
+		clientConn.Close()
+		proxyConn.Close()
+	}()
+
+	io.Copy(proxyConn, clientConn)
+	proxyConn.Close()
+	clientConn.Close()
 
 }
