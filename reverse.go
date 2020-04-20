@@ -1,6 +1,7 @@
 package reverseproxy
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -419,13 +420,15 @@ func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	go func() {
-		io.Copy(clientConn, proxyConn)
+		count, err := io.Copy(clientConn, proxyConn)
 		clientConn.Close()
 		proxyConn.Close()
+		p.logf(fmt.Sprintf("request sent to %s, count=%v err=%v", req.URL.Host, count, err))
 	}()
 
-	io.Copy(proxyConn, clientConn)
+	count1, err1 := io.Copy(proxyConn, clientConn)
 	proxyConn.Close()
 	clientConn.Close()
+	p.logf(fmt.Sprintf("response copyed from %s, count1=%v err1=%v", req.URL.Host, count1, err1))
 
 }
