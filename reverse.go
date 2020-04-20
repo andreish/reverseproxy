@@ -384,7 +384,7 @@ func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
 		transport = http.DefaultTransport
 	}
 
-	p.logf("ServeHTTPS: %s", req.URL.Host)
+	p.logf("ServeHTTPS: $s %s", req.URL.Scheme, req.URL.Host)
 	outreq := new(http.Request)
 	// Shallow copies of maps, like header
 	*outreq = *req
