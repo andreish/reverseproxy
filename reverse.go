@@ -374,3 +374,9 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		p.ProxyHTTP(rw, req)
 	}
 }
+
+func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
+
+	p.ProxyHTTPS(rw, req)
+
+}
