@@ -390,11 +390,7 @@ func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	proxyConn, err := net.Dial("tcp", req.URL.Host)
-	if err != nil {
-		p.logf("http: proxy error: %v", err)
-		return
-	}
+	proxyClient := http.Client{Timeout: 10 * time.Second}
 
 	// The returned net.Conn may have read or write deadlines
 	// already set, depending on the configuration of the
@@ -413,22 +409,17 @@ func (p *ReverseProxy) ServeHTTPS(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	err = proxyConn.SetDeadline(deadline)
-	if err != nil {
-		p.logf("http: proxy error: %v", err)
-		return
+	resp, err1 := proxyClient.Do(req)
+	if err1 != nil {
+		p.logf("filed to send request: %v", err1)
 	}
-
-	go func() {
-		count, err := io.Copy(clientConn, proxyConn)
-		clientConn.Close()
-		proxyConn.Close()
-		p.logf(fmt.Sprintf("request sent to %s, count=%v err=%v", req.URL.Host, count, err))
+	defer func() {
+		if nil != resp.Body {
+			resp.Body.Close()
+		}
 	}()
 
-	count1, err1 := io.Copy(proxyConn, clientConn)
-	proxyConn.Close()
-	clientConn.Close()
-	p.logf(fmt.Sprintf("response copyed from %s, count1=%v err1=%v", req.URL.Host, count1, err1))
+	resp.Write(rw)
+	p.logf(fmt.Sprintf("response copyed from %s", req.URL.Host))
 
 }
